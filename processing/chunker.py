@@ -4,6 +4,7 @@ import json
 import csv
 from typing import List, Dict, Optional, Union
 import logging
+import pandas as pd
 
 from core.config import ChunkingConfig
 from utils.utils import estimate_tokens, generate_chunk_id, VietnameseTextProcessor
@@ -131,9 +132,9 @@ class HierarchicalChunker:
         return chunks
     
     def _create_enhanced_parent_metadata(self, section: Dict, doc_structure: DocumentStructure, 
-                                       header_context: Optional[HeaderInfo], has_tables: bool,
-                                       document_metadata: Dict) -> Dict:
-        """Create enhanced metadata for parent chunk with complete header information and document metadata from Excel"""
+                                    header_context: Optional[HeaderInfo], has_tables: bool,
+                                    document_metadata: Dict) -> Dict:
+        """Create enhanced metadata for parent chunk with sanitized values"""
         metadata = {
             'chunk_level': 'parent',
             'section_title': section.get('title', ''),
@@ -145,16 +146,10 @@ class HierarchicalChunker:
             'section_type': section.get('type', 'unknown')
         }
         
-        # Add document metadata from Excel (prioritized over doc_structure)
+        # Add document metadata from Excel (sanitized)
         if document_metadata:
-            metadata.update({
-                'doc_id': document_metadata.get('doc_id', ''),
-                'document_title': document_metadata.get('doc_title', doc_structure.title),
-                'filename': document_metadata.get('filename', ''),
-                'doc_date': document_metadata.get('doc_date', ''),
-                'topic': document_metadata.get('topic', ''),
-                'file_path': document_metadata.get('file_path', '')
-            })
+            sanitized_doc_metadata = self._sanitize_document_metadata(document_metadata)
+            metadata.update(sanitized_doc_metadata)
         else:
             # Fallback to doc_structure if no document_metadata
             metadata['document_title'] = doc_structure.title
@@ -185,30 +180,24 @@ class HierarchicalChunker:
         return metadata
     
     def _create_enhanced_child_metadata(self, section: Dict, doc_structure: DocumentStructure,
-                                      chunk_index: int, content_type: str, 
-                                      header_context: Optional[HeaderInfo],
-                                      document_metadata: Dict) -> Dict:
-        """Create enhanced metadata for child chunk"""
+                                    chunk_index: int, content_type: str, 
+                                    header_context: Optional[HeaderInfo],
+                                    document_metadata: Dict) -> Dict:
+        """Create enhanced metadata for child chunk with sanitized values"""
         metadata = {
             'chunk_level': 'child',
             'chunk_index': chunk_index,
-            'content_type': content_type,  # 'text', 'table_summary', 'table_data'
+            'content_type': content_type,
             'section_title': section.get('title', ''),
             'section_level': section.get('level', 0),
             'administrative_info': section.get('administrative_info', {}),
             'section_type': section.get('type', 'unknown')
         }
         
-        # Add document metadata from Excel (prioritized over doc_structure)
+        # Add document metadata from Excel (sanitized)
         if document_metadata:
-            metadata.update({
-                'doc_id': document_metadata.get('doc_id', ''),
-                'document_title': document_metadata.get('doc_title', doc_structure.title),
-                'filename': document_metadata.get('filename', ''),
-                'doc_date': document_metadata.get('doc_date', ''),
-                'topic': document_metadata.get('topic', ''),
-                'file_path': document_metadata.get('file_path', '')
-            })
+            sanitized_doc_metadata = self._sanitize_document_metadata(document_metadata)
+            metadata.update(sanitized_doc_metadata)
         else:
             # Fallback to doc_structure if no document_metadata
             metadata['document_title'] = doc_structure.title
@@ -232,7 +221,77 @@ class HierarchicalChunker:
         metadata['hierarchy_path'] = hierarchy_path
         
         return metadata
-    
+    def _sanitize_document_metadata(self, document_metadata: Dict) -> Dict:
+        """Sanitize document metadata to ensure JSON serialization"""
+        sanitized = {}
+        
+        for key, value in document_metadata.items():
+            if key == 'doc_date':
+                # Special handling for doc_date
+                sanitized[key] = self._sanitize_date_value(value)
+            elif isinstance(value, (int, float, str, bool, type(None))):
+                # Basic types are safe
+                sanitized[key] = value
+            elif isinstance(value, (list, tuple)):
+                # Convert lists/tuples, sanitizing each element
+                sanitized[key] = [self._sanitize_value(item) for item in value]
+            elif isinstance(value, dict):
+                # Recursively sanitize dictionaries
+                sanitized[key] = self._sanitize_document_metadata(value)
+            else:
+                # Convert complex objects to string
+                sanitized[key] = str(value)
+        
+        return sanitized
+
+    def _sanitize_date_value(self, date_value) -> str:
+        """Sanitize date value specifically"""
+        if not date_value or pd.isna(date_value):
+            return 'Unknown'
+        
+        # If already a string, return as is
+        if isinstance(date_value, str):
+            return date_value.strip()
+        
+        # Handle pandas Timestamp
+        try:
+            if isinstance(date_value, pd.Timestamp):
+                return date_value.strftime('%Y-%m-%d')
+        except Exception:
+            pass
+        
+        # Handle datetime objects
+        try:
+            import datetime
+            if isinstance(date_value, (datetime.datetime, datetime.date)):
+                return date_value.strftime('%Y-%m-%d')
+        except Exception:
+            pass
+        
+        # Handle numpy datetime
+        try:
+            import numpy as np
+            if isinstance(date_value, np.datetime64):
+                return str(date_value)[:10]
+        except Exception:
+            pass
+        
+        # Fallback
+        try:
+            return str(date_value).strip()
+        except Exception:
+            return 'Unknown'
+
+    def _sanitize_value(self, value):
+        """Sanitize individual value for JSON serialization"""
+        if isinstance(value, (int, float, str, bool, type(None))):
+            return value
+        elif hasattr(value, '__dict__'):
+            # Object with attributes - convert to dict
+            return {k: self._sanitize_value(v) for k, v in value.__dict__.items()}
+        else:
+            return str(value)
+        
     def _build_enhanced_hierarchy_path(self, section: Dict, header_context: Optional[HeaderInfo]) -> str:
         """Build enhanced hierarchy path with full header context"""
         if header_context and header_context.full_path:

@@ -5,8 +5,6 @@ import pickle
 import os
 from abc import ABC, abstractmethod
 from processing.chunker import Chunk
-from processing.embedder import VietnameseEmbedder
-from utils.utils import estimate_tokens
 import logging
 from datetime import datetime
 import uuid

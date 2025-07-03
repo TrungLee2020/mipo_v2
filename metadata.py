@@ -6,6 +6,7 @@ import json
 import logging
 from pathlib import Path
 import pandas as pd
+import numpy as np
 import hashlib
 from datetime import datetime
 import glob
@@ -78,7 +79,7 @@ class MetadataManager:
             self.file_checksums[file_path] = checksum
     
     def get_documents_to_process(self, base_directory: str = None, force_reindex: bool = False) -> List[Dict]:
-        """Get list of documents that need processing based on metadata"""
+        """Get list of documents that need processing based on metadata with sanitized data"""
         if not self.metadata_sheets:
             self.load_metadata()
         
@@ -86,7 +87,7 @@ class MetadataManager:
             return []
         
         documents_to_process = []
-        mising_files = [] # Danh sách các file không tồn tại so với metadata
+        missing_files = []
         
         # Process each topic (sheet)
         for topic, df in self.metadata_sheets.items():
@@ -99,24 +100,28 @@ class MetadataManager:
                 filename = row.get('filename', '')
                 doc_id = row.get('doc_id', '')
                 doc_title = row.get('doc_title', '')
-                doc_date = row.get('doc_date', '')
+                doc_date_raw = row.get('doc_date', '')
+                if hasattr(doc_date_raw, 'strftime') and not pd.isna(doc_date_raw):
+                    doc_date = doc_date_raw.strftime('%Y-%m-%d')
+                else:
+                    doc_date = str(doc_date_raw) if doc_date_raw else 'Unknown'
                 has_tables = row.get('has_tables', 0)
                 
+                # IMPORTANT: Sanitize doc_date here
+                doc_date_str = self._sanitize_doc_date(doc_date)
+                
                 file_path = None
-                # 1. Nếu là đường dẫn tuyệt đối và tồn tại
+                # File path resolution logic (unchanged)
                 if os.path.isabs(filename) and os.path.exists(filename):
                     file_path = filename
-                # 2. Nếu có base_directory
                 elif base_directory:
                     candidate = os.path.join(base_directory, filename)
                     if os.path.exists(candidate):
                         file_path = candidate
-                # 3. Nếu có mapping topic->folder
                 elif topic in self.topic_map_dir:
                     candidate = os.path.join(self.topic_map_dir[topic], filename)
                     if os.path.exists(candidate):
                         file_path = candidate
-                # 4. Tìm kiếm đệ quy trong base_directory nếu vẫn chưa thấy
                 if not file_path and base_directory:
                     matches = list(glob.glob(os.path.join(base_directory, '**', filename), recursive=True))
                     if matches:
@@ -124,13 +129,13 @@ class MetadataManager:
                 
                 # Check if file exists
                 if not file_path or not os.path.exists(file_path):
-                    logger.warning(f"⚠️ File not found: {filename} (metadata: doc_id={doc_id}, title={doc_title}, topic={topic})")
-                    mising_files.append({
+                    logger.warning(f"⚠️ File not found: {filename}")
+                    missing_files.append({
                         'file_path': filename,
                         'filename': filename,
-                        'doc_id': doc_id,
-                        'doc_title': doc_title,
-                        'doc_date': doc_date,
+                        'doc_id': str(doc_id),  # Ensure string
+                        'doc_title': str(doc_title),  # Ensure string
+                        'doc_date': doc_date_str,  # Use sanitized date
                         'topic': topic,
                     })
                     continue
@@ -139,12 +144,13 @@ class MetadataManager:
                 needs_processing = force_reindex or self.has_file_changed(file_path)
                 
                 if needs_processing:
+                    # Create sanitized document info
                     document_info = {
                         'file_path': file_path,
                         'filename': filename,
-                        'doc_id': doc_id,
-                        'doc_title': doc_title,
-                        'doc_date': doc_date,
+                        'doc_id': str(doc_id),  # Ensure string
+                        'doc_title': str(doc_title),  # Ensure string
+                        'doc_date': doc_date,  # Already converted to string
                         'topic': topic,
                         'has_tables': bool(has_tables),
                         'needs_processing': True
@@ -155,11 +161,43 @@ class MetadataManager:
                     logger.debug(f"  ⏭️ Skipped (unchanged): {filename}")
         
         logger.info(f"📋 Found {len(documents_to_process)} documents to process")
-        if mising_files:
-            logger.warning(f"⚠️ {len(mising_files)} files missing compared to metadata:")
-            for missing in mising_files:
-                logger.warning(f"  - {missing['file_path']} (doc_id={missing['doc_id']}, title={missing['doc_title']}, topic={missing['topic']})")
+        if missing_files:
+            logger.warning(f"⚠️ {len(missing_files)} files missing compared to metadata")
         return documents_to_process
+
+    def _sanitize_doc_date(self, doc_date_value) -> str:
+        """Convert doc_date to string format to avoid serialization issues"""
+        if not doc_date_value or pd.isna(doc_date_value):
+            return 'Unknown'
+        
+        # If already a string, return as is
+        if isinstance(doc_date_value, str):
+            return doc_date_value.strip()
+        
+        # Handle pandas Timestamp
+        if isinstance(doc_date_value, pd.Timestamp):
+            return doc_date_value.strftime('%Y-%m-%d')
+        
+        # Handle datetime objects
+        try:
+            import datetime
+            if isinstance(doc_date_value, (datetime.datetime, datetime.date)):
+                return doc_date_value.strftime('%Y-%m-%d')
+        except Exception:
+            pass
+        
+        # Handle numpy datetime
+        try:
+            if isinstance(doc_date_value, np.datetime64):
+                return str(doc_date_value)[:10]  # Get YYYY-MM-DD part
+        except Exception:
+            pass
+        
+        # Fallback: convert to string
+        try:
+            return str(doc_date_value).strip()
+        except Exception:
+            return 'Unknown'
     
     def get_topic_statistics(self) -> Dict:
         """Get statistics by topic"""
